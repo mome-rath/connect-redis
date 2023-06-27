@@ -1,8 +1,8 @@
-import {SessionData, Store} from "express-session"
+import { SessionData, Store } from "express-session"
 
-type UserSessionData = SessionData & {userId: string}
+type UserSessionData = SessionData & { userId: string }
 
-const noop = (_err?: unknown, _data?: any) => {}
+const noop = (_err?: unknown, _data?: any) => { }
 const rxPrefix = /^(?:[\w_]+[^\w_]|[\w]+\W)$/gi
 
 interface NormalizedRedisClient {
@@ -24,7 +24,7 @@ interface RedisStoreOptions {
   prefix?: string
   scanCount?: number
   serializer?: Serializer
-  ttl?: number | {(sess: UserSessionData): number}
+  ttl?: number | { (sess: UserSessionData): number }
   disableTTL?: boolean
   disableTouch?: boolean
 }
@@ -36,7 +36,7 @@ class RedisStore extends Store {
   separator: string
   scanCount: number
   serializer: Serializer
-  ttl: number | {(sess: UserSessionData): number}
+  ttl: number | { (sess: UserSessionData): number }
   disableTTL: boolean
   disableTouch: boolean
 
@@ -64,7 +64,7 @@ class RedisStore extends Store {
       set: (key, val, ttl) => {
         if (ttl) {
           return isRedis
-            ? client.set(key, val, {EX: ttl})
+            ? client.set(key, val, { EX: ttl })
             : client.set(key, val, "EX", ttl)
         }
         return client.set(key, val)
@@ -73,7 +73,7 @@ class RedisStore extends Store {
       expire: (key, ttl) => client.expire(key, ttl),
       mget: (keys) => (isRedis ? client.mGet(keys) : client.mget(keys)),
       scanIterator: (match, count) => {
-        if (isRedis) return client.scanIterator({MATCH: match, COUNT: count})
+        if (isRedis) return client.scanIterator({ MATCH: match, COUNT: count })
 
         // ioredis impl.
         return (async function* () {
@@ -101,7 +101,7 @@ class RedisStore extends Store {
 
   async set(sid: string, sess: UserSessionData, cb = noop) {
     let key = this.prefix + sid
-    let userKey = this.prefixWOSeparator + sess.userId + this.separator + sid;
+    let userKey = this.prefixWOSeparator + sess.userId + this.separator + sid
     let ttl = this._getTTL(sess)
     try {
       let val = this.serializer.stringify(sess)
@@ -124,7 +124,7 @@ class RedisStore extends Store {
 
   async touch(sid: string, sess: UserSessionData, cb = noop) {
     let key = this.prefix + sid
-    let userKey = this.prefixWOSeparator + sess.userId + this.separator + sid;
+    let userKey = this.prefixWOSeparator + sess.userId + this.separator + sid
     if (this.disableTouch || this.disableTTL) return cb()
     try {
       const ttl = this._getTTL(sess)
@@ -139,10 +139,10 @@ class RedisStore extends Store {
   async destroy(sid: string, cb = noop) {
     let key = this.prefix + sid
     try {
-      const data = await this.client.get(key);
-      if (data == null) return cb();
-      const sess = await this.serializer.parse(data);
-      const userKey = this.prefixWOSeparator + sess.userId + this.separator + sid;
+      const data = await this.client.get(key)
+      if (data == null) return cb()
+      const sess = await this.serializer.parse(data)
+      const userKey = this.prefixWOSeparator + sess.userId + this.separator + sid
       await this.client.del([key, userKey])
       return cb()
     } catch (err) {
