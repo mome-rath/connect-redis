@@ -1,6 +1,9 @@
 import {SessionData, Store} from "express-session"
 
+type UserSessionData = SessionData & {userId: string}
+
 const noop = (_err?: unknown, _data?: any) => {}
+const rxPrefix = /^(?:[\w_]+[^\w_]|[\w]+\W)$/gi
 
 interface NormalizedRedisClient {
   get(key: string): Promise<string | null>
@@ -12,8 +15,8 @@ interface NormalizedRedisClient {
 }
 
 interface Serializer {
-  parse(s: string): SessionData | Promise<SessionData>
-  stringify(s: SessionData): string
+  parse(s: string): UserSessionData | Promise<UserSessionData>
+  stringify(s: UserSessionData): string
 }
 
 interface RedisStoreOptions {
@@ -21,7 +24,7 @@ interface RedisStoreOptions {
   prefix?: string
   scanCount?: number
   serializer?: Serializer
-  ttl?: number | {(sess: SessionData): number}
+  ttl?: number | {(sess: UserSessionData): number}
   disableTTL?: boolean
   disableTouch?: boolean
 }
@@ -29,15 +32,22 @@ interface RedisStoreOptions {
 class RedisStore extends Store {
   client: NormalizedRedisClient
   prefix: string
+  prefixWOSeparator: string
+  separator: string
   scanCount: number
   serializer: Serializer
-  ttl: number | {(sess: SessionData): number}
+  ttl: number | {(sess: UserSessionData): number}
   disableTTL: boolean
   disableTouch: boolean
 
   constructor(opts: RedisStoreOptions) {
     super()
     this.prefix = opts.prefix == null ? "sess:" : opts.prefix
+    if (!rxPrefix.test(this.prefix)) {
+      this.prefix += ':'
+    }
+    this.prefixWOSeparator = this.prefix.substring(0, this.prefix.length - 1)
+    this.separator = this.prefix.charAt(this.prefix.length)
     this.scanCount = opts.scanCount || 100
     this.serializer = opts.serializer || JSON
     this.ttl = opts.ttl || 86400 // One day in seconds.
@@ -89,14 +99,20 @@ class RedisStore extends Store {
     }
   }
 
-  async set(sid: string, sess: SessionData, cb = noop) {
+  async set(sid: string, sess: UserSessionData, cb = noop) {
     let key = this.prefix + sid
+    let userKey = this.prefixWOSeparator + sess.userId + this.separator + sid;
     let ttl = this._getTTL(sess)
     try {
       let val = this.serializer.stringify(sess)
       if (ttl > 0) {
-        if (this.disableTTL) await this.client.set(key, val)
-        else await this.client.set(key, val, ttl)
+        if (this.disableTTL) {
+          await this.client.set(key, val)
+          await this.client.set(userKey, key)
+        } else {
+          await this.client.set(key, val, ttl)
+          await this.client.set(userKey, key, ttl)
+        }
         return cb()
       } else {
         return this.destroy(sid, cb)
@@ -106,11 +122,14 @@ class RedisStore extends Store {
     }
   }
 
-  async touch(sid: string, sess: SessionData, cb = noop) {
+  async touch(sid: string, sess: UserSessionData, cb = noop) {
     let key = this.prefix + sid
+    let userKey = this.prefixWOSeparator + sess.userId + this.separator + sid;
     if (this.disableTouch || this.disableTTL) return cb()
     try {
-      await this.client.expire(key, this._getTTL(sess))
+      const ttl = this._getTTL(sess)
+      await this.client.expire(key, ttl)
+      await this.client.expire(userKey, ttl)
       return cb()
     } catch (err) {
       return cb(err)
@@ -120,7 +139,11 @@ class RedisStore extends Store {
   async destroy(sid: string, cb = noop) {
     let key = this.prefix + sid
     try {
-      await this.client.del([key])
+      const data = await this.client.get(key);
+      if (data == null) return cb();
+      const sess = await this.serializer.parse(data);
+      const userKey = this.prefixWOSeparator + sess.userId + this.separator + sid;
+      await this.client.del([key, userKey])
       return cb()
     } catch (err) {
       return cb(err)
@@ -129,7 +152,18 @@ class RedisStore extends Store {
 
   async clear(cb = noop) {
     try {
-      let keys = await this._getAllKeys()
+      let keys = await this._getAllKeys(true)
+      if (!keys.length) return cb()
+      await this.client.del(keys)
+      return cb()
+    } catch (err) {
+      return cb(err)
+    }
+  }
+
+  async clearForUser(uid: string, cb = noop) {
+    try {
+      let keys = await this._getUserKeys(uid)
       if (!keys.length) return cb()
       await this.client.del(keys)
       return cb()
@@ -140,7 +174,7 @@ class RedisStore extends Store {
 
   async length(cb = noop) {
     try {
-      let keys = await this._getAllKeys()
+      let keys = await this._getAllKeys(false)
       return cb(null, keys.length)
     } catch (err) {
       return cb(err)
@@ -150,7 +184,7 @@ class RedisStore extends Store {
   async ids(cb = noop) {
     let len = this.prefix.length
     try {
-      let keys = await this._getAllKeys()
+      let keys = await this._getAllKeys(false)
       return cb(
         null,
         keys.map((k) => k.substring(len))
@@ -163,7 +197,7 @@ class RedisStore extends Store {
   async all(cb = noop) {
     let len = this.prefix.length
     try {
-      let keys = await this._getAllKeys()
+      let keys = await this._getAllKeys(false)
       if (keys.length === 0) return cb(null, [])
 
       let data = await this.client.mget(keys)
@@ -173,14 +207,14 @@ class RedisStore extends Store {
         sess.id = keys[idx].substring(len)
         acc.push(sess)
         return acc
-      }, [] as SessionData[])
+      }, [] as UserSessionData[])
       return cb(null, results)
     } catch (err) {
       return cb(err)
     }
   }
 
-  private _getTTL(sess: SessionData) {
+  private _getTTL(sess: UserSessionData) {
     if (typeof this.ttl === "function") {
       return this.ttl(sess)
     }
@@ -195,11 +229,22 @@ class RedisStore extends Store {
     return ttl
   }
 
-  private async _getAllKeys() {
-    let pattern = this.prefix + "*"
+  private async _getAllKeys(includeUserKeys = false) {
+    let pattern = (includeUserKeys ? this.prefixWOSeparator : this.prefix) + "*"
     let keys = []
     for await (let key of this.client.scanIterator(pattern, this.scanCount)) {
       keys.push(key)
+    }
+    return keys
+  }
+
+  private async _getUserKeys(userId: string) {
+    const userPrefix = this.prefixWOSeparator + userId + this.separator
+    let pattern = userPrefix + "*"
+    let keys = []
+    for await (let key of this.client.scanIterator(pattern, this.scanCount)) {
+      keys.push(key)
+      keys.push(this.prefix + key.substring(userPrefix.length))
     }
     return keys
   }
