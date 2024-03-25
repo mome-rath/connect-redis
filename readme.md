@@ -56,14 +56,14 @@ let redisStore = new RedisStore({
   prefix: "myapp:",
 })
 
-// Initialize sesssion storage.
+// Initialize session storage.
 app.use(
   session({
     store: redisStore,
     resave: false, // required: force lightweight session keep alive (touch)
     saveUninitialized: false, // recommended: only save session when data exists
     secret: "keyboard cat",
-  })
+  }),
 )
 ```
 
