@@ -48,10 +48,11 @@ async function lifecycleTest(
   client: any,
   t: test.Test,
 ): Promise<void> {
+  const userId = "hogwash"
   const P = (f: any) => promisify(f).bind(store)
   let res = await P(store.clear)()
 
-  let sess = {foo: "bar"}
+  let sess = {foo: "bar", userId}
   await P(store.set)("123", sess)
 
   res = await P(store.get)("123")
@@ -62,13 +63,13 @@ async function lifecycleTest(
 
   ttl = 60
   let expires = new Date(Date.now() + ttl * 1000).toISOString()
-  await P(store.set)("456", {cookie: {expires}})
+  await P(store.set)("456", {cookie: {expires}, userId})
   ttl = await client.ttl("sess:456")
   t.ok(ttl <= 60, "check expires ttl")
 
   ttl = 90
   let expires2 = new Date(Date.now() + ttl * 1000).toISOString()
-  await P(store.touch)("456", {cookie: {expires: expires2}})
+  await P(store.touch)("456", {cookie: {expires: expires2}, userId})
   ttl = await client.ttl("sess:456")
   t.ok(ttl > 60, "check expires ttl touch")
 
@@ -84,8 +85,8 @@ async function lifecycleTest(
   t.same(
     res,
     [
-      {id: "123", foo: "bar"},
-      {id: "456", cookie: {expires}},
+      {id: "123", userId, foo: "bar"},
+      {id: "456", userId, cookie: {expires}},
     ],
     "stored two keys data",
   )
@@ -109,23 +110,40 @@ async function lifecycleTest(
   res = await P(store.length)()
   t.equal(res, 0, "bulk clear")
 
+  ttl = 60
   expires = new Date(Date.now() + ttl * 1000).toISOString() // expires in the future
-  res = await P(store.set)("789", {cookie: {expires}})
+  res = await P(store.set)("789", {cookie: {expires}, userId})
 
   res = await P(store.length)()
   t.equal(res, 1, "one key exists (session 789)")
 
   expires = new Date(Date.now() - ttl * 1000).toISOString() // expires in the past
-  await P(store.set)("789", {cookie: {expires}})
+  await P(store.set)("789", {cookie: {expires}, userId})
 
   res = await P(store.length)()
   t.equal(res, 0, "no key remains and that includes session 789")
+
+  const otherUser = "nothoghwash"
+  expires = new Date(Date.now() + ttl * 1000).toISOString() // future again
+  await P(store.set)("111", {cookie: {expires}, userId})
+  await P(store.set)("222", {cookie: {expires}, userId})
+  await P(store.set)("333", {cookie: {expires}, userId: otherUser})
+  res = await P(store.length)()
+  t.equal(res, 3, "added 3 keys from multiple users")
+
+  await store.clearForUser(userId)
+  res = await P(store.length)()
+  t.equal(res, 1, "clear for user removed all keys by single user")
+
+  await store.clearForUser(otherUser)
+  res = await P(store.length)()
+  t.equal(res, 0, "clear for user removed all keys by other user")
 }
 
 async function load(store: RedisStore, count: number) {
   let cookie = new Cookie()
   for (let sid = 0; sid < count; sid++) {
     cookie.expires = new Date(Date.now() + 1000)
-    await store.set("s" + sid, {cookie})
+    await store.set("s" + sid, {cookie, userId: "bulkRap"})
   }
 }

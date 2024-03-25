@@ -1,9 +1,9 @@
-import { SessionData, Store } from "express-session"
+import {SessionData, Store} from "express-session"
 
-type UserSessionData = SessionData & { userId: string }
+type UserSessionData = SessionData & {userId: string}
 
-const noop = (_err?: unknown, _data?: any) => { }
-const rxPrefix = /^(?:[\w_]+[^\w_]|[\w]+\W)$/gi
+const noop = (_err?: unknown, _data?: any) => {}
+const rxPrefix = /^(?:[\w]+\W|[a-z\d]+[^a-z\d])$/gi // \w includes "_"
 
 interface NormalizedRedisClient {
   get(key: string): Promise<string | null>
@@ -24,7 +24,7 @@ interface RedisStoreOptions {
   prefix?: string
   scanCount?: number
   serializer?: Serializer
-  ttl?: number | { (sess: UserSessionData): number }
+  ttl?: number | {(sess: UserSessionData): number}
   disableTTL?: boolean
   disableTouch?: boolean
 }
@@ -36,7 +36,7 @@ class RedisStore extends Store {
   separator: string
   scanCount: number
   serializer: Serializer
-  ttl: number | { (sess: UserSessionData): number }
+  ttl: number | {(sess: UserSessionData): number}
   disableTTL: boolean
   disableTouch: boolean
 
@@ -44,10 +44,11 @@ class RedisStore extends Store {
     super()
     this.prefix = opts.prefix == null ? "sess:" : opts.prefix
     if (!rxPrefix.test(this.prefix)) {
-      this.prefix += ':'
+      this.prefix += ":"
     }
+    rxPrefix.lastIndex = 0 // RESET THIS! Otherwise it will give erroneous values the next time!
     this.prefixWOSeparator = this.prefix.substring(0, this.prefix.length - 1)
-    this.separator = this.prefix.charAt(this.prefix.length)
+    this.separator = this.prefix.charAt(this.prefix.length - 1)
     this.scanCount = opts.scanCount || 100
     this.serializer = opts.serializer || JSON
     this.ttl = opts.ttl || 86400 // One day in seconds.
@@ -64,7 +65,7 @@ class RedisStore extends Store {
       set: (key, val, ttl) => {
         if (ttl) {
           return isRedis
-            ? client.set(key, val, { EX: ttl })
+            ? client.set(key, val, {EX: ttl})
             : client.set(key, val, "EX", ttl)
         }
         return client.set(key, val)
@@ -73,7 +74,7 @@ class RedisStore extends Store {
       expire: (key, ttl) => client.expire(key, ttl),
       mget: (keys) => (isRedis ? client.mGet(keys) : client.mget(keys)),
       scanIterator: (match, count) => {
-        if (isRedis) return client.scanIterator({ MATCH: match, COUNT: count })
+        if (isRedis) return client.scanIterator({MATCH: match, COUNT: count})
 
         // ioredis impl.
         return (async function* () {
@@ -142,7 +143,8 @@ class RedisStore extends Store {
       const data = await this.client.get(key)
       if (data == null) return cb()
       const sess = await this.serializer.parse(data)
-      const userKey = this.prefixWOSeparator + sess.userId + this.separator + sid
+      const userKey =
+        this.prefixWOSeparator + sess.userId + this.separator + sid
       await this.client.del([key, userKey])
       return cb()
     } catch (err) {
