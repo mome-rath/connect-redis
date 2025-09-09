@@ -1,18 +1,16 @@
-import {SessionData, Store} from "express-session"
+import { type SessionData, Store } from "express-session"
+import type { RedisClientType, RedisClusterType } from "redis"
 
-type UserSessionData = SessionData & {userId: string}
+type UserSessionData = SessionData & { userId: string }
+type Callback = (_err?: unknown, _data?: any) => any
 
-const noop = (_err?: unknown, _data?: any) => {}
-const rxPrefix = /^(?:[\w]+\W|[a-z\d]+[^a-z\d])$/gi // \w includes "_"
-
-interface NormalizedRedisClient {
-  get(key: string): Promise<string | null>
-  set(key: string, value: string, ttl?: number): Promise<string | null>
-  expire(key: string, ttl: number): Promise<number | boolean>
-  scanIterator(match: string, count: number): AsyncIterable<string>
-  del(key: string[]): Promise<number>
-  mget(key: string[]): Promise<(string | null)[]>
+function optionalCb(err: unknown, data: unknown, cb?: Callback) {
+  if (cb) return cb(err, data)
+  if (err) throw err
+  return data
 }
+
+const rxPrefix = /^(?:[\w]+\W|[a-z\d]+[^a-z\d])$/gi // \w includes "_"
 
 interface Serializer {
   parse(s: string): UserSessionData | Promise<UserSessionData>
@@ -24,19 +22,19 @@ interface RedisStoreOptions {
   prefix?: string
   scanCount?: number
   serializer?: Serializer
-  ttl?: number | {(sess: UserSessionData): number}
+  ttl?: number | ((sess: UserSessionData) => number)
   disableTTL?: boolean
   disableTouch?: boolean
 }
 
-class RedisStore extends Store {
-  client: NormalizedRedisClient
+export class RedisStore extends Store {
+  client: RedisClientType | RedisClusterType
   prefix: string
   prefixWOSeparator: string
   separator: string
   scanCount: number
   serializer: Serializer
-  ttl: number | {(sess: UserSessionData): number}
+  ttl: number | ((sess: UserSessionData) => number)
   disableTTL: boolean
   disableTouch: boolean
 
@@ -54,155 +52,127 @@ class RedisStore extends Store {
     this.ttl = opts.ttl || 86400 // One day in seconds.
     this.disableTTL = opts.disableTTL || false
     this.disableTouch = opts.disableTouch || false
-    this.client = this.normalizeClient(opts.client)
+    this.client = opts.client
   }
 
-  // Create a redis and ioredis compatible client
-  private normalizeClient(client: any): NormalizedRedisClient {
-    let isRedis = "scanIterator" in client
-    return {
-      get: (key) => client.get(key),
-      set: (key, val, ttl) => {
-        if (ttl) {
-          return isRedis
-            ? client.set(key, val, {EX: ttl})
-            : client.set(key, val, "EX", ttl)
-        }
-        return client.set(key, val)
-      },
-      del: (key) => client.del(key),
-      expire: (key, ttl) => client.expire(key, ttl),
-      mget: (keys) => (isRedis ? client.mGet(keys) : client.mget(keys)),
-      scanIterator: (match, count) => {
-        if (isRedis) return client.scanIterator({MATCH: match, COUNT: count})
-
-        // ioredis impl.
-        return (async function* () {
-          let [c, xs] = await client.scan("0", "MATCH", match, "COUNT", count)
-          for (let key of xs) yield key
-          while (c !== "0") {
-            ;[c, xs] = await client.scan(c, "MATCH", match, "COUNT", count)
-            for (let key of xs) yield key
-          }
-        })()
-      },
-    }
-  }
-
-  async get(sid: string, cb = noop) {
+  async get(sid: string, cb?: Callback) {
     let key = this.prefix + sid
     try {
       let data = await this.client.get(key)
-      if (!data) return cb()
-      return cb(null, await this.serializer.parse(data))
+      if (!data) return optionalCb(null, null, cb)
+      return optionalCb(null, await this.serializer.parse(data), cb)
     } catch (err) {
-      return cb(err)
+      return optionalCb(err, null, cb)
     }
   }
 
-  async set(sid: string, sess: UserSessionData, cb = noop) {
+  async set(sid: string, sess: UserSessionData, cb?: Callback) {
     let key = this.prefix + sid
     let userKey = this.prefixWOSeparator + sess.userId + this.separator + sid
-    let ttl = this._getTTL(sess)
+    let ttl = this.getTTL(sess)
     try {
-      let val = this.serializer.stringify(sess)
       if (ttl > 0) {
+        let val = this.serializer.stringify(sess)
         if (this.disableTTL) {
           await this.client.set(key, val)
           await this.client.set(userKey, key)
         } else {
-          await this.client.set(key, val, ttl)
-          await this.client.set(userKey, key, ttl)
+          await this.client.set(key, val, {
+            expiration: { type: "EX", value: ttl },
+          })
+          await this.client.set(userKey, key, {
+            expiration: { type: "EX", value: ttl },
+          })
         }
-        return cb()
-      } else {
-        return this.destroy(sid, cb)
+        return optionalCb(null, null, cb)
       }
+      return this.destroy(sid, cb)
     } catch (err) {
-      return cb(err)
+      return optionalCb(err, null, cb)
     }
   }
 
-  async touch(sid: string, sess: UserSessionData, cb = noop) {
+  async touch(sid: string, sess: UserSessionData, cb?: Callback) {
     let key = this.prefix + sid
     let userKey = this.prefixWOSeparator + sess.userId + this.separator + sid
-    if (this.disableTouch || this.disableTTL) return cb()
+    if (this.disableTouch || this.disableTTL) return optionalCb(null, null, cb)
     try {
-      const ttl = this._getTTL(sess)
+      const ttl = this.getTTL(sess)
       await this.client.expire(key, ttl)
       await this.client.expire(userKey, ttl)
-      return cb()
+      return optionalCb(null, null, cb)
     } catch (err) {
-      return cb(err)
+      return optionalCb(err, null, cb)
     }
   }
 
-  async destroy(sid: string, cb = noop) {
+  async destroy(sid: string, cb?: Callback) {
     let key = this.prefix + sid
     try {
       const data = await this.client.get(key)
-      if (data == null) return cb()
+      if (data == null) return optionalCb(null, null, cb)
       const sess = await this.serializer.parse(data)
       const userKey =
         this.prefixWOSeparator + sess.userId + this.separator + sid
       await this.client.del([key, userKey])
-      return cb()
+      return optionalCb(null, null, cb)
     } catch (err) {
-      return cb(err)
+      return optionalCb(err, null, cb)
     }
   }
 
-  async clear(cb = noop) {
+  async clear(cb?: Callback) {
     try {
-      let keys = await this._getAllKeys(true)
-      if (!keys.length) return cb()
+      let keys = await this.getAllKeys(true)
+      if (!keys.length) return optionalCb(null, null, cb)
       await this.client.del(keys)
-      return cb()
+      return optionalCb(null, null, cb)
     } catch (err) {
-      return cb(err)
+      return optionalCb(err, null, cb)
     }
   }
 
-  async clearForUser(uid: string, cb = noop) {
+  async clearForUser(uid: string, cb?: Callback) {
     try {
-      let keys = await this._getUserKeys(uid)
-      if (!keys.length) return cb()
+      let keys = await this.getUserKeys(uid)
+      if (!keys.length) return optionalCb(null, null, cb)
       await this.client.del(keys)
-      return cb()
+      return optionalCb(null, null, cb)
     } catch (err) {
-      return cb(err)
+      return optionalCb(err, null, cb)
     }
   }
 
-  async length(cb = noop) {
+  async length(cb?: Callback) {
     try {
-      let keys = await this._getAllKeys(false)
-      return cb(null, keys.length)
+      let keys = await this.getAllKeys(false)
+      return optionalCb(null, keys.length, cb)
     } catch (err) {
-      return cb(err)
+      return optionalCb(err, null, cb)
     }
   }
 
-  async ids(cb = noop) {
+  async ids(cb?: Callback) {
     let len = this.prefix.length
     try {
-      let keys = await this._getAllKeys(false)
-      return cb(
+      let keys = await this.getAllKeys(false)
+      return optionalCb(
         null,
         keys.map((k) => k.substring(len)),
+        cb,
       )
     } catch (err) {
-      return cb(err)
+      return optionalCb(err, null, cb)
     }
   }
 
-  async all(cb = noop) {
+  async all(cb?: Callback) {
     let len = this.prefix.length
     try {
-      let keys = await this._getAllKeys(false)
-      if (keys.length === 0) return cb(null, [])
+      let keys = await this.getAllKeys(false)
+      if (keys.length === 0) return optionalCb(null, [], cb)
 
-      let data = await this.client.mget(keys)
+      let data = await this.client.mGet(keys)
       let results = data.reduce((acc, raw, idx) => {
         if (!raw) return acc
         let sess = this.serializer.parse(raw) as any
@@ -210,19 +180,19 @@ class RedisStore extends Store {
         acc.push(sess)
         return acc
       }, [] as UserSessionData[])
-      return cb(null, results)
+      return optionalCb(null, results, cb)
     } catch (err) {
-      return cb(err)
+      return optionalCb(err, null, cb)
     }
   }
 
-  private _getTTL(sess: UserSessionData) {
+  private getTTL(sess: UserSessionData) {
     if (typeof this.ttl === "function") {
       return this.ttl(sess)
     }
 
     let ttl
-    if (sess && sess.cookie && sess.cookie.expires) {
+    if (sess?.cookie?.expires) {
       let ms = Number(new Date(sess.cookie.expires)) - Date.now()
       ttl = Math.ceil(ms / 1000)
     } else {
@@ -231,24 +201,48 @@ class RedisStore extends Store {
     return ttl
   }
 
-  private async _getAllKeys(includeUserKeys = false) {
+  private async getAllKeys(includeUserKeys = false) {
     let pattern = (includeUserKeys ? this.prefixWOSeparator : this.prefix) + "*"
-    let keys = []
-    for await (let key of this.client.scanIterator(pattern, this.scanCount)) {
-      keys.push(key)
+    let set = new Set<string>()
+    for await (let keys of this.scanIterator(pattern, this.scanCount)) {
+      for (let key of keys) {
+        set.add(key)
+      }
     }
-    return keys
+    return set.size > 0 ? Array.from(set) : []
   }
 
-  private async _getUserKeys(userId: string) {
+  private scanIterator(match: string, count: number) {
+    let client = this.client
+
+    if (!("masters" in client)) {
+      return client.scanIterator({ MATCH: match, COUNT: count })
+    }
+
+    return (async function* () {
+      for (let master of client.masters) {
+        let c = await client.nodeClient(master)
+        for await (let keys of c.scanIterator({
+          COUNT: count,
+          MATCH: match,
+        })) {
+          yield keys
+        }
+      }
+    })()
+  }
+
+  private async getUserKeys(userId: string) {
     const userPrefix = this.prefixWOSeparator + userId + this.separator
     let pattern = userPrefix + "*"
-    let keys = []
-    for await (let key of this.client.scanIterator(pattern, this.scanCount)) {
-      keys.push(key)
-      keys.push(this.prefix + key.substring(userPrefix.length))
+    let set = new Set<string>()
+    for await (let keys of this.scanIterator(pattern, this.scanCount)) {
+      for (let key of keys) {
+        set.add(key)
+        set.add(this.prefix + key.substring(userPrefix.length))
+      }
     }
-    return keys
+    return set.size > 0 ? Array.from(set) : []
   }
 }
 

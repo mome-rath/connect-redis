@@ -1,48 +1,23 @@
-![Build Status](https://github.com/tj/connect-redis/workflows/build/badge.svg?branch=master) [![npm](https://img.shields.io/npm/v/connect-redis.svg)](https://npmjs.com/package/connect-redis) [![code-style](https://img.shields.io/badge/code_style-prettier-ff69b4.svg)](https://gitter.im/jlongster/prettier) ![Downloads](https://img.shields.io/npm/dm/connect-redis.svg)
+[![build](https://github.com/tj/connect-redis/actions/workflows/build.yml/badge.svg)](https://github.com/tj/connect-redis/actions/workflows/build.yml) [![npm](https://img.shields.io/npm/v/connect-redis.svg)](https://npmjs.com/package/connect-redis) ![Downloads](https://img.shields.io/npm/dm/connect-redis.svg)
 
 **connect-redis** provides Redis session storage for Express.
 
 ## Installation
 
-**connect-redis** requires `express-session` to installed and one of the following compatible Redis clients:
-
-- [`redis`][1]
-- [`ioredis`][2]
-
-Install with `redis`:
+**connect-redis** requires `express-session` and [`redis`][1]:
 
 ```sh
 npm install redis connect-redis express-session
 ```
 
-Install with `ioredis`:
-
-```sh
-npm install ioredis connect-redis express-session
-```
-
-## Importing
-
-**connect-redis** supports both CommonJS (`require`) and ESM (`import`) modules.
-
-Import using ESM/Typescript:
-
-```js
-import RedisStore from "connect-redis"
-```
-
-Require using CommonJS:
-
-```js
-const RedisStore = require("connect-redis").default
-```
+**TypeScript note**: types included in the package, don't install `@types/connect-redis`.
 
 ## API
 
-Full setup using [`redis`][1] package:
+Full setup:
 
 ```js
-import RedisStore from "connect-redis"
+import {RedisStore} from "connect-redis"
 import session from "express-session"
 import {createClient} from "redis"
 
@@ -73,7 +48,7 @@ app.use(
 
 ##### client
 
-An instance of [`redis`][1] or [`ioredis`][2].
+An instance of [`redis`][1]
 
 ##### prefix
 
@@ -136,4 +111,3 @@ interface Serializer {
 Value used for _count_ parameter in [Redis `SCAN` command](https://redis.io/commands/scan#the-count-option). Used for `ids()` and `all()` methods (default: `100`).
 
 [1]: https://github.com/NodeRedis/node-redis
-[2]: https://github.com/luin/ioredis

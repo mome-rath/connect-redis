@@ -1,149 +1,131 @@
-import test from "blue-tape"
-import {Cookie} from "express-session"
-import {Redis} from "ioredis"
-import {promisify} from "node:util"
-import {createClient} from "redis"
-import RedisStore from "./"
+import { Cookie } from "express-session"
+import { createClient } from "redis"
+import { expect, test } from "vitest"
+import { RedisStore } from "./"
 import * as redisSrv from "./testdata/server"
 
 test("setup", async () => {
   await redisSrv.connect()
 })
 
-test("defaults", async (t) => {
-  let client = createClient({url: `redis://localhost:${redisSrv.port}`})
+test("defaults", async () => {
+  let client = createClient({ url: `redis://localhost:${redisSrv.port}` })
   await client.connect()
 
-  let store = new RedisStore({client})
+  let store = new RedisStore({ client })
 
-  t.ok(store.client, "stores client")
-  t.equal(store.prefix, "sess:", "defaults to sess:")
-  t.equal(store.ttl, 86400, "defaults to one day")
-  t.equal(store.scanCount, 100, "defaults SCAN count to 100")
-  t.equal(store.serializer, JSON, "defaults to JSON serialization")
-  t.equal(store.disableTouch, false, "defaults to having `touch` enabled")
-  t.equal(store.disableTTL, false, "defaults to having `ttl` enabled")
-  await client.disconnect()
+  expect(store.client).toBeDefined()
+  expect(store.prefix).toBe("sess:")
+  expect(store.ttl).toBe(86400) // defaults to one day
+  expect(store.scanCount).toBe(100)
+  expect(store.serializer).toBe(JSON)
+  expect(store.disableTouch).toBe(false)
+  expect(store.disableTTL).toBe(false)
+  client.destroy()
 })
 
-test("redis", async (t) => {
-  let client = createClient({url: `redis://localhost:${redisSrv.port}`})
+test("redis", async () => {
+  let client = createClient({ url: `redis://localhost:${redisSrv.port}` })
   await client.connect()
-  let store = new RedisStore({client})
-  await lifecycleTest(store, client, t)
-  await client.disconnect()
-})
-
-test("ioredis", async (t) => {
-  let client = new Redis(`redis://localhost:${redisSrv.port}`)
-  let store = new RedisStore({client})
-  await lifecycleTest(store, client, t)
-  client.disconnect()
+  let store = new RedisStore({ client })
+  await lifecycleTest(store, client)
+  client.destroy()
 })
 
 test("teardown", redisSrv.disconnect)
 
-async function lifecycleTest(
-  store: RedisStore,
-  client: any,
-  t: test.Test,
-): Promise<void> {
+async function lifecycleTest(store: RedisStore, client: any): Promise<void> {
   const userId = "hogwash"
-  const P = (f: any) => promisify(f).bind(store)
-  let res = await P(store.clear)()
+  let res = await store.clear()
 
-  let sess = {foo: "bar", userId}
-  await P(store.set)("123", sess)
+  let sess = { foo: "bar", cookie: { originalMaxAge: null }, userId }
+  await store.set("123", sess)
 
-  res = await P(store.get)("123")
-  t.same(res, sess, "store.get")
+  res = await store.get("123")
+  expect(res).toEqual(sess)
 
   let ttl = await client.ttl("sess:123")
-  t.ok(ttl >= 86399, "check one day ttl")
+  expect(ttl).toBeGreaterThanOrEqual(86399)
 
   ttl = 60
-  let expires = new Date(Date.now() + ttl * 1000).toISOString()
-  await P(store.set)("456", {cookie: {expires}, userId})
+  let expires = new Date(Date.now() + ttl * 1000)
+  await store.set("456", { cookie: { originalMaxAge: null, expires }, userId })
   ttl = await client.ttl("sess:456")
-  t.ok(ttl <= 60, "check expires ttl")
+  expect(ttl).toBeLessThanOrEqual(60)
 
   ttl = 90
-  let expires2 = new Date(Date.now() + ttl * 1000).toISOString()
-  await P(store.touch)("456", {cookie: {expires: expires2}, userId})
+  let expires2 = new Date(Date.now() + ttl * 1000)
+  await store.touch("456", { cookie: { originalMaxAge: null, expires: expires2 }, userId })
   ttl = await client.ttl("sess:456")
-  t.ok(ttl > 60, "check expires ttl touch")
+  expect(ttl).toBeGreaterThan(60)
 
-  res = await P(store.length)()
-  t.equal(res, 2, "stored two keys length")
+  res = await store.length()
+  expect(res).toBe(2) // stored two keys length
 
-  res = await P(store.ids)()
+  res = await store.ids()
   res.sort()
-  t.same(res, ["123", "456"], "stored two keys ids")
+  expect(res).toEqual(["123", "456"])
 
-  res = await P(store.all)()
+  res = await store.all()
   res.sort((a: any, b: any) => (a.id > b.id ? 1 : -1))
-  t.same(
-    res,
-    [
-      {id: "123", userId, foo: "bar"},
-      {id: "456", userId, cookie: {expires}},
-    ],
-    "stored two keys data",
-  )
+  expect(res).toEqual([
+    { id: "123", userId, foo: "bar", cookie: { originalMaxAge: null } },
+    { id: "456", userId, cookie: { originalMaxAge: null, expires: expires.toISOString() } },
+  ])
 
-  await P(store.destroy)("456")
-  res = await P(store.length)()
-  t.equal(res, 1, "one key remains")
+  await store.destroy("456")
+  res = await store.length()
+  expect(res).toBe(1) // one key remains
 
-  res = await P(store.clear)()
+  res = await store.clear()
 
-  res = await P(store.length)()
-  t.equal(res, 0, "no keys remain")
+  res = await store.length()
+  expect(res).toBe(0) // no keys remain
 
   let count = 1000
   await load(store, count)
 
-  res = await P(store.length)()
-  t.equal(res, count, "bulk count")
+  res = await store.length()
+  expect(res).toBe(count)
 
-  await P(store.clear)()
-  res = await P(store.length)()
-  t.equal(res, 0, "bulk clear")
+  await store.clear()
+  res = await store.length()
+  expect(res).toBe(0)
 
   ttl = 60
-  expires = new Date(Date.now() + ttl * 1000).toISOString() // expires in the future
-  res = await P(store.set)("789", {cookie: {expires}, userId})
+  expires = new Date(Date.now() + ttl * 1000) // expires in the future
+  res = await store.set("789", { cookie: { originalMaxAge: null, expires }, userId })
 
-  res = await P(store.length)()
-  t.equal(res, 1, "one key exists (session 789)")
+  res = await store.length()
+  expect(res).toBe(1)
 
-  expires = new Date(Date.now() - ttl * 1000).toISOString() // expires in the past
-  await P(store.set)("789", {cookie: {expires}, userId})
+  expires = new Date(Date.now() - ttl * 1000) // expires in the past
+  await store.set("789", { cookie: { originalMaxAge: null, expires }, userId })
 
-  res = await P(store.length)()
-  t.equal(res, 0, "no key remains and that includes session 789")
+  res = await store.length()
+  expect(res).toBe(0) // no key remains and that includes session 789
 
   const otherUser = "nothoghwash"
-  expires = new Date(Date.now() + ttl * 1000).toISOString() // future again
-  await P(store.set)("111", {cookie: {expires}, userId})
-  await P(store.set)("222", {cookie: {expires}, userId})
-  await P(store.set)("333", {cookie: {expires}, userId: otherUser})
-  res = await P(store.length)()
-  t.equal(res, 3, "added 3 keys from multiple users")
+  expires = new Date(Date.now() + ttl * 1000) // future again
+  await store.set("111", { cookie: { originalMaxAge: null, expires }, userId })
+  await store.set("222", { cookie: { originalMaxAge: null, expires }, userId })
+  await store.set("333", { cookie: { originalMaxAge: null, expires }, userId: otherUser })
+  res = await store.length()
+  expect(res).toBe(3) // added 3 keys from multiple users
 
   await store.clearForUser(userId)
-  res = await P(store.length)()
-  t.equal(res, 1, "clear for user removed all keys by single user")
+  res = await store.length()
+  expect(res).toBe(1) // clear for user removed all keys by single user
 
   await store.clearForUser(otherUser)
-  res = await P(store.length)()
-  t.equal(res, 0, "clear for user removed all keys by other user")
+  res = await store.length()
+  expect(res).toBe(0) // clear for user removed all keys by other user
 }
 
 async function load(store: RedisStore, count: number) {
   let cookie = new Cookie()
   for (let sid = 0; sid < count; sid++) {
     cookie.expires = new Date(Date.now() + 1000)
-    await store.set("s" + sid, {cookie, userId: "bulkRap"})
+    await store.set("s" + sid, { cookie, userId: "bulkRap" })
   }
 }
